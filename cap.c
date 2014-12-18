@@ -2,7 +2,7 @@
 /*
  * C Auxilary Preprocessor
  *
- * $Id: cap.c,v 1.100 2014/12/12 06:19:53 sjg Exp $
+ * $Id: cap.c,v 1.104 2014/12/18 21:04:33 sjg Exp $
  *
  * (c) Stephen Geary, Jan 2011
  *
@@ -39,11 +39,11 @@
 #include <errno.h>
 
 
-static char *cap_version = "$Revision: 1.100 $" ;
+static char *cap_version = "$Revision: 1.104 $" ;
 
-
-// #define DEBUGVER
-
+/*
+#define DEBUGVER
+ */
 
 
 #ifdef DEBUGVER
@@ -108,9 +108,16 @@ static FILE *fout = NULL ;
                         (fs) = NULL ; \
                     }
 
-#define FPUT(c)     fputc( (int)(c), fout )
+#define FPUT(c)     { if( (c) != -1 ){ fputc( (int)(c), fout ) ; } }
 
-#define FPUTS(b)    fputs( (b), fout )
+#define FPUTS(b)    { if( (b) != NULL ){ fputs( (b), fout ) ; } }
+
+
+/* Track source line numbers and use #linenum inserted into the output to
+ * enable subsequent passes by cpp or a compiler to report the correct
+ * line numbers in our source files !
+ */
+static unsigned int linenum = 1 ;
 
 
 static boolean skip_is_on = FALSE ;
@@ -464,6 +471,13 @@ int nextchar()
         rotatingbufferindex++ ;
         rotatingbufferindex %= BUFFLEN ;
     }
+    
+    if( /* retv */ lastchar_read == (int)'\n' )
+    {
+        linenum++ ;
+    }
+    
+    // if( retv != -1 ){ fputc( retv, stderr ) ; }
     
     return retv ;
 }
@@ -1586,7 +1600,7 @@ write_error:
         \
         debugf( "Accepted keyword :: " #_kw "\n" ) ; \
         \
-        return retv ; \
+        goto err_exit ; \
     }
 
 #define flag_keyword( _kw, _flag, _value ) \
@@ -1599,7 +1613,9 @@ write_error:
         \
         debugf( "Accepted flag:: " #_kw "\n" ) ; \
         \
-        return 0 ; \
+        retv = 0 ; \
+        \
+        goto err_exit ; \
     }
     
 
@@ -1610,8 +1626,10 @@ int process()
     /* for safety
      */
     buff[BUFFLEN] = '\0' ;
-
-    debugf( "buff = [%s]\n", buff ) ;
+    
+    // debugf( "prebuff  = [%s]\n", prebuff ) ;
+    // debugf( "buff     = [%s]\n", buff ) ;
+    // debugf( "postbuff = [%s]\n", postbuff ) ;
     
     flag_keyword( skipoff, skip_is_on, FALSE ) ;
     
@@ -1641,7 +1659,9 @@ int process()
 
         changes_made = TRUE ;
 
-        return 0 ;
+        retv = 0 ;
+        
+        goto err_exit ;
     }
 
     if( iskeyword("debugoff") )
@@ -1652,7 +1672,9 @@ int process()
 
         changes_made = TRUE ;
 
-        return 0 ;
+        retv = 0 ;
+        
+        goto err_exit ;
     }
 
     process_keyword( quote, quote() ) ;
@@ -1686,6 +1708,13 @@ int process()
     flag_keyword( return_macro_off, apply_return_macro, FALSE ) ;
     
     process_keyword( def_return_macro, def_return_macro() ) ;
+    
+err_exit:
+    
+    // if( ! changes_made )
+    // {
+        fprintf( fout, "#line %d\n", linenum ) ;
+    // }
     
     return retv ;
 }
@@ -1750,6 +1779,8 @@ int main_process()
     quote_pending = FALSE ;
     
     skip_is_on = FALSE ;
+    
+    linenum = 1 ;
 
     /* Now process the file ... 
      */
@@ -1780,8 +1811,18 @@ int main_process()
 
                 if( c == -1 )
                     break ;
-
-                if( ( c == '*' ) && ( lastchar_read == '/' ) )
+                
+                if( ( c == '/' ) && ( c == '/' ) )
+                {
+                    // Single line comment - read and output to EOL
+                    
+                    read_to_eol() ;
+                    
+                    FPUT( c ) ;
+                    FPUTS( buff ) ;
+                    FPUT( '\n' ) ;
+                }
+                else if( ( c == '*' ) && ( lastchar_read == '/' ) )
                 {
                     DBGLINE() ;
                 
@@ -2055,7 +2096,7 @@ int main_process()
                     leadingspaces = 0 ;
 
                     j = 1 ;
-
+                    
                     while( j < i )
                     {
                         FPUT( buff[j] ) ;
@@ -2068,18 +2109,25 @@ int main_process()
                     FPUT( c ) ;
                     
                     /* Now write out everything until EOL without continuation mark
+                     *
+                     * but check if the last char was a newline, in which case we had
+                     * some like '  #  else\n' as a line and reading another char will
+                     * put us on the next line !
                      */
                     
-                    c = nextchar() ;
-                    
-                    while( ( c != -1 ) && ( !feof(fin) ) && ! istrueeol() )
+                    if( c != (int)'\n' )
                     {
-                        FPUT( c ) ;
-                        
                         c = nextchar() ;
-                    };
-                    
-                    FPUT( c ) ;
+                        
+                        while( ( c != -1 ) && ( !feof(fin) ) && ! istrueeol() )
+                        {
+                            FPUT( c ) ;
+                            
+                            c = nextchar() ;
+                        };
+                        
+                        FPUT( c ) ;
+                    }
                 }
 
                 if( isspace(c) )
@@ -2102,7 +2150,7 @@ int main_process()
 
 static void version()
 {
-    char ver[128] = "$Revision: 1.100 $" ;
+    char ver[128] = "$Revision: 1.104 $" ;
     
     /* Skip the RCS string preceeding the version number
      */
