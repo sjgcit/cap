@@ -2,7 +2,7 @@
 /*
  * C Auxilary Preprocessor
  *
- * $Id: cap.c,v 1.104 2014/12/18 21:04:33 sjg Exp $
+ * $Id: cap.c,v 1.106 2014/12/19 08:32:12 sjg Exp $
  *
  * (c) Stephen Geary, Jan 2011
  *
@@ -39,7 +39,7 @@
 #include <errno.h>
 
 
-static char *cap_version = "$Revision: 1.104 $" ;
+static char *cap_version = "$Revision: 1.106 $" ;
 
 /*
 #define DEBUGVER
@@ -59,6 +59,9 @@ static char *cap_version = "$Revision: 1.104 $" ;
 #  define debug_on()
 #  define debug_off()
 #endif /* DEBUGVER */
+
+
+#define ERRC(c)  fputc((int)(c), stderr )
 
 
 #ifndef boolean
@@ -465,11 +468,12 @@ int nextchar()
     lastchar_read = currentchar_read ;
     currentchar_read = retv ;
     
-    if( ( ! in_quotes ) && ( ! in_comment ) )
+    if( /* ( ! in_quotes ) && */ ( ! in_comment ) )
     {
-        rotatingbuffer[rotatingbufferindex] = retv ;
+        rotatingbuffer[rotatingbufferindex] = (char)retv ;
         rotatingbufferindex++ ;
         rotatingbufferindex %= BUFFLEN ;
+        rotatingbuffer[rotatingbufferindex] = 0 ;
     }
     
     if( /* retv */ lastchar_read == (int)'\n' )
@@ -478,6 +482,111 @@ int nextchar()
     }
     
     // if( retv != -1 ){ fputc( retv, stderr ) ; }
+    
+    return retv ;
+}
+
+/*******************************************************
+ */
+
+/* Read characters inside quotations until we either run out
+ * ( which is an error and returns -1 ) or we reach the end
+ * quotation mark, when we can return 0
+ *
+ * The characters are passed directly to the output stream
+ *
+ * This routine must allow for escaped charaters.
+ *
+ * Assumes we have already read the opening quotation mark
+ */
+int pass_chars_in_quotes( int endquotechar )
+{
+    int retv = 0 ;
+
+    int c = -1 ;
+    int d = -1 ;
+
+    c = nextchar() ;
+    
+    while( ( c != -1 ) && !feof(fin) )
+    {
+        FPUT( c ) ;
+        
+        if( c == endquotechar )
+            /* quote ended properly
+             */
+            break ;
+        
+        if( c == '\n' ) 
+        {
+            return -1 ;
+        }
+        
+        if( c == '\\' )
+        {
+            // an escaped character - read the next char
+            
+            d = nextchar() ;
+            
+            switch( d )
+            {
+                case (int)'0' :
+                case (int)'1' :
+                case (int)'2' :
+                case (int)'3' :
+                case (int)'4' :
+                case (int)'5' :
+                case (int)'6' :
+                case (int)'7' :
+                    /* octal : at nost 3 octal digits
+                     */
+                    FPUT( d ) ;
+                    d = nextchar() ;
+                    if( ( d < (int)'0' ) || ( d > (int)'7' ) )
+                    {
+                        pendchar( d ) ;
+                        break ;
+                    }
+                    FPUT( d ) ;
+                    d = nextchar() ;
+                    if( ( d < (int)'0' ) || ( d > (int)'7' ) )
+                    {
+                        pendchar( d ) ;
+                        break ;
+                    }
+                    FPUT( d ) ;
+                    break ;
+                
+                case 'x' :
+                case 'u' :
+                case 'U' :
+                    /* all of these are arbitrarily long sequences of hex digits
+                     */
+                    while( ( !feof(fin) ) && ( d != '\n' ) && isxdigit( d ) )
+                    {
+                        FPUT( d ) ;
+                        d = nextchar() ;
+                    };
+                    /* the last char read was a dud for some reason
+                     * put it in the pending character store
+                     */
+                    pendchar( d ) ;
+                    break ;
+                
+                default:
+                    /* The default handles both well defined single escaped chars
+                     * and undefined single escaped chars the same - it
+                     * assumes the char is valid and outputs it.
+                     *
+                     * This is typical behavior for C-like parsers.
+                     */
+                    FPUT( d ) ;
+                    break ;
+            }
+        }
+        
+        c = nextchar() ;
+    };
     
     return retv ;
 }
@@ -1787,7 +1896,7 @@ int main_process()
 
     while( ( c != -1 ) && ( !feof(fin) ) )
     {
-        DBGLINE() ;
+        // DBGLINE() ;
         
         c = nextchar() ;
         
@@ -1801,7 +1910,7 @@ int main_process()
              * we reach EOL or EOF with special handling.
              */
             
-            DBGLINE() ;
+            // DBGLINE() ;
             
             FPUT(c) ;
 
@@ -1812,7 +1921,19 @@ int main_process()
                 if( c == -1 )
                     break ;
                 
-                if( ( c == '/' ) && ( c == '/' ) )
+                if( ( c == '\'' ) && ( lastchar_read != '\\' ) )
+                {
+                    /* a single char in quotes - could be escaped
+                     * treat like a quoted string
+                     */
+                    
+                    FPUT( c ) ;
+                    
+                    pass_chars_in_quotes( '\'' ) ;
+                    
+                    c = currentchar_read ;
+                }
+                else if( ( c == '/' ) && ( lastchar_read == '/' ) )
                 {
                     // Single line comment - read and output to EOL
                     
@@ -1820,7 +1941,11 @@ int main_process()
                     
                     FPUT( c ) ;
                     FPUTS( buff ) ;
-                    FPUT( '\n' ) ;
+                    FPUT( currentchar_read ) ;
+                    
+                    c = currentchar_read ;
+                    
+                    // fprintf( stderr, "single line comment at %d : [%c%s]\n", linenum, (char)c, buff ) ;
                 }
                 else if( ( c == '*' ) && ( lastchar_read == '/' ) )
                 {
@@ -1852,57 +1977,20 @@ int main_process()
                     
                     in_comment = FALSE ;
                 }
-                else if( ( ( c == '"' ) && ( lastchar != '\\' ) ) && ! in_quotes )
+                else if( ( ( c == '"' ) && ( lastchar_read != '\\' ) /* && ( lastchar_read != '\'' ) */ ) && ! in_quotes )
                 {
                     DBGLINE() ;
-                
+                    
                     /* a double quotes character starting something in quotes
                      */
                     
+                    FPUT( c ) ;
+                    
                     in_quotes = TRUE ;
                     
-                    /* We treat this like a comment
-                     *
-                     * In C either the string literal must end on the same
-                     * line with a matching quotation OR it must use
-                     * continuation marks at the end of the line
-                     */
-                     
-                    FPUT(c) ;
+                    pass_chars_in_quotes( (int)'\"' ) ;
                     
-                    c = nextchar() ;
-                    
-                    FPUT(c) ;
-                    
-                    while( ( c != -1 ) && ( !feof(fin) ) )
-                    {
-                        if( ( c == '"' ) && ( lastchar != '\\' ) )
-                        {
-                            /* end quotation mark
-                             */
-                            
-                            DBGLINE() ;
-                            
-                            break ;
-                        }
-                        else if( istrueeol() )
-                        {
-                            /* That's a syntax error in C - an open quoted string literal
-                             * which has not closed by line end but the line has no
-                             * continuation mark
-                             *
-                             * return -1 for an error
-                             */
-                            
-                            DBGLINE() ;
-                            
-                            return -1 ;
-                        }
-                        
-                        c = nextchar() ;
-                        
-                        FPUT(c) ;
-                    };
+                    c = currentchar_read ;
                     
                     in_quotes = FALSE ;
                     
@@ -2141,7 +2229,24 @@ int main_process()
         }
     };
     
-    return 0 ;
+err_exit:
+    
+    /* DEBUG Stuff
+     */
+     
+    /*
+    {
+        int ii = 0 ;
+    
+        ii = rotatingbufferindex - 10 ;
+    
+        if( ii < 0 ){ ii = 0  ;}
+    
+        fprintf( stderr, "END buff = [%s] indicies ( 0 to %d->%d )\n", rotatingbuffer+ii, rotatingbufferindex, ii ) ;
+    }
+    */
+    
+    return retv ;
 }
 
 /*******************************************************
@@ -2150,7 +2255,7 @@ int main_process()
 
 static void version()
 {
-    char ver[128] = "$Revision: 1.104 $" ;
+    char ver[128] = "$Revision: 1.106 $" ;
     
     /* Skip the RCS string preceeding the version number
      */
