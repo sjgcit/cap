@@ -209,11 +209,13 @@ Braces ( '{' and '}' ) in C denote scope levels and it is sometimes desirable to
 
 This command turns on that substitution.  It will continue until it is turned off.  Note that braces can be included in the macro you expand to and they will *not* be processed ( no nasty recursion to crash things ).
 
+Note that you **replace** the brace using this, so if you need a brace in the code then you **must** explicitly include it in the macro definition.  This allows more flexibility.  Note how the macros are defined in the example.
+
 Here's an example :
 ```C
-#def_open_brace hello() ;
+#def_open_brace { hello() ;
 
-#def_close_brace goodbye() ;
+#def_close_brace goodbye() ; }
 
 #brace_macros_on
 
@@ -230,7 +232,7 @@ if( a )
 goodbye() ; }
 ```
 
-Note also the related *return_macro* functionality.
+Note also the related *return_macro* functionality.  As you would expect only "naked" braces will be replaced.  Braces inside quotes or comments will **not** be replaced.
 
 Possible uses include debugging and placing hook calls to control e.g. custom memory allocation and freeing when you exit a scope.
 
@@ -289,4 +291,5 @@ Turns the return macro functionality one.
 #### **\#return_macro_**
 
 Turns the return macro functionality off.
+
 
