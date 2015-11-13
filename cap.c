@@ -2,7 +2,7 @@
 /*
  * C Auxilary Preprocessor
  *
- * $Id: cap.c,v 1.106 2014/12/19 08:32:12 sjg Exp $
+ * $Id: cap.c,v 1.138 2015/11/13 11:40:10 sjg Exp $
  *
  * (c) Stephen Geary, Jan 2011
  *
@@ -24,22 +24,26 @@
 #include <malloc.h>
 #include <string.h>
 
+#include <stdlib.h>
+
+#include <errno.h>
+
+/* The following are requied for the Linux fork()/exec()/wait()
+ * functions.
+ */
+
 #include <sys/types.h>
 #include <sys/wait.h>
 
 #include <unistd.h>
 
-#include <sys/stat.h>
-#include <sys/fcntl.h>
-
-#include <stdlib.h>
-
-#include <sched.h>
-
-#include <errno.h>
+//#include <sys/stat.h>
+//#include <sys/fcntl.h>
+//#include <sched.h>
 
 
-static char *cap_version = "$Revision: 1.106 $" ;
+
+static char *cap_version = "$Revision: 1.138 $" ;
 
 /*
 #define DEBUGVER
@@ -64,8 +68,8 @@ static char *cap_version = "$Revision: 1.106 $" ;
 #define ERRC(c)  fputc((int)(c), stderr )
 
 
-#ifndef boolean
-  typedef unsigned int boolean ;
+#ifndef boolean_t
+  typedef unsigned int boolean_t ;
 #endif
 
 #ifndef TRUE
@@ -80,6 +84,7 @@ static char *cap_version = "$Revision: 1.106 $" ;
 #define toggle(b)   if( (b) == FALSE ){ (b) = TRUE ; }else{ (b) = FALSE ; }
 
 #define safe_free(ptr)  if( (ptr) != NULL ){ free(ptr) ; (ptr) = NULL ; }
+
 
 
 /* Sometime we want to apply a macro to open and close braces
@@ -123,9 +128,9 @@ static FILE *fout = NULL ;
 static unsigned int linenum = 1 ;
 
 
-static boolean skip_is_on = FALSE ;
+static boolean_t skip_is_on = FALSE ;
 
-static boolean changes_made = FALSE ;
+static boolean_t changes_made = FALSE ;
 
 #define DEFAULT_MACROCHAR '#'
 
@@ -135,11 +140,136 @@ static char macrochar = DEFAULT_MACROCHAR ;
 
 
 
-#define BUFFLEN 1024
+#define BUFFLEN 1023
 
-static char prebuff[BUFFLEN+1] ;
-static char buff[BUFFLEN+1] ;
-static char postbuff[BUFFLEN+1] ;
+
+/*
+ */
+
+
+#define BUFFER_DECL( _sym ) \
+							static char _sym [ BUFFLEN + 1 ] ; \
+							static int _sym ## _idx = 0 ;
+
+#define BUFFER_INDEX( _sym )	( _sym ## _idx )
+
+
+
+BUFFER_DECL( prebuff ) ;
+BUFFER_DECL( buff ) ;
+BUFFER_DECL( postbuff ) ;
+
+
+#define BUFFER_INIT( _buff )	{ \
+									_buff [ 0 ] = 0 ; \
+									_buff [ BUFFLEN ] = 0 ; \
+									_buff ## _idx = 0 ; \
+								}
+
+
+#define BUFFER_AVAILABLE( _buff )	( _buff ## _idx < BUFFLEN )
+
+
+#define appendc( _c, _buff )	appendc_fn( (_c), (_buff), BUFFLEN, &_buff ## _idx )
+
+#define appends( _s, _buff )	appends_fn( (_s), (_buff), BUFFLEN, &_buff ## _idx )
+
+
+/* appendc_fn() will append a char at the index position.
+ * 
+ * when the index points to the last char in the buffer
+ * we always write the new character.  This does mean
+ * that the buffer is filled and loose characters, but
+ * may mean that we eventually get to an EOL, EOS or EOF
+ * character, which is important.
+ */
+static void appendc_fn( int c, char *buff, int buffsz, int *idxp )
+{
+	if( ( buff == NULL ) || ( idxp == NULL ) )
+		return ;
+	
+	if( *idxp < 0 )
+		return ;
+	
+	buff[*idxp] = (char)c ;
+	
+	if( *idxp < buffsz )
+	{
+		(*idxp)++ ;
+	}
+}
+
+/* appends_fn() writes a string, terminated by a nul char,
+ * to the buffer. Like appendc_fn() it always writes the
+ * last character to the buffer, even if the buffer is filled.
+ */
+static void appends_fn( char *str, char *buff, int buffsz, int *idxp )
+{
+	if( ( str == NULL ) || ( buff == NULL ) || ( idxp == NULL ) )
+		return ;
+	
+	if( *idxp < 0 )
+		return ;
+	
+	char *p = str ;
+	int k = *idxp ;
+	
+	while( *p != 0 )
+	{
+		buff[k] = *p ;
+		
+		if( k < buffsz )
+		{
+			k++ ;
+		}
+		
+		p++ ;
+	};
+	
+	/* make sure the buffer is nul terminated
+	 */
+	buff[k] = 0 ;
+	
+	/* update the index
+	 */
+	*idxp = k ;
+}
+
+
+#define READ_FROM_BUFFER( _buff )	read_from_buffer_fn( (_buff), BUFFLEN, &_buff ## _idx )
+
+
+/* read one character from a buffer if possible.
+ * 
+ * return -1 is reading is not possible
+ */
+
+static int read_from_buffer_fn( char *buff, int buffsz, int *idxp )
+{
+	int retv = 0 ;
+	
+	if( ( buff == NULL ) || ( idxp == NULL ) )
+	{
+		return -1 ;
+	}
+	
+	if( ( *idxp <= 0 ) || ( *idxp >= buffsz ) )
+	{
+		return -1 ;
+	}
+	
+	(*idxp)-- ;
+	
+	retv = buff[ *idxp ] ;
+	
+	return retv ;
+}
+
+
+
+/***********************************************************************
+ */
+
 
 static int lastchar = -1 ;
 
@@ -185,7 +315,7 @@ static int iskeyword( char *str )
         return 0 ;
     
     /* need to avoid white spaces in comparisons
-     * as we'd like spacing to be legal
+     * as we'd like spacing to be allowed
      *
      * We assume that "keyword" is space trimmed
      * which it should be.
@@ -243,17 +373,9 @@ static wordstack_t *wordstackp = NULL ;
 
 /* copy the buffer str to the indicated buffer
  */
-void copybuff( char *dest )
-{
-    int i = 0 ;
 
-    do
-    {
-        dest[i] = buff[i] ;
-        i++ ;
-    }
-    while( ( i < BUFFLEN ) && ( buff[i] != '\0' ) ) ;
-}
+
+#define copybuff( _dest )	strncpy( (_dest), buff, sizeof(buff) )
 
 
 /*******************************************************
@@ -285,86 +407,72 @@ static int quote_pending = FALSE ;
 static int escape_pending = FALSE ;
 
 /* the following is used to allow us to backtrack the last
- * character we read
+ * characters we read
  *
  * if pendingchar is -1 then there is no character saved for
  * reading
  */
-static int pendingchar = -1 ;
 
+/*
+BUFFER_DECL( pendingchar ) ;
 
-void pendchar( int c )
-{
-    pendingchar = c ;
-}
+#define pendcharbuffer( c )   appendc( c, pendingcharbuffer )
+*/
 
+static int pendingchar = 0 ;
 
-/*******************************************************
- */
+#define pendcharbuffer( c )		{ pendingchar = (int)(c) ; }
 
-static char deferredbuffer[BUFFLEN+1] ;
-
-static int deferredbufferindex = -1 ;
-
-
-static void append_to_deferredbuffer( char *buff )
-{
-    if( buff == NULL )
-        return ;
-        
-    if( buff[0] == 0 )
-        return ;
-
-    int i = 0 ;
-    
-    int j = deferredbufferindex ;
-    
-    if( j == -1 )
-    {
-        j = 0 ;
-    }
-    else
-    {
-        while( deferredbuffer[j] != 0 )
-            j++ ;
-    }
-
-    while( ( buff[i] != 0 ) && ( j < BUFFLEN ) )
-    {
-        deferredbuffer[j] = buff[i] ;
-        j++ ;
-        i++ ;
-    };
-    
-    deferredbuffer[j] = 0 ;
-    
-    if( deferredbufferindex == -1 )
-        deferredbufferindex = 0 ;
-}
+#define pendchar( _ci )			{ pendingchar = (int)(_ci) ; }
 
 
 /*******************************************************
  */
 
-int read_from_deferred_buffer()
+BUFFER_DECL( deferredbuffer ) ;
+
+#define read_from_deferred_buffer()        READ_FROM_BUFFER( deferredbuffer )
+
+#define append_to_deferredbuffer( _src )    append_to_deferredbuffer_fn( (_src) )
+
+static void append_to_deferredbuffer_fn( char *src )
 {
-    int retv = 0 ;
-    
-    if( deferredbufferindex == -1 )
-        return -1 ;
-
-    retv = (int)deferredbuffer[ deferredbufferindex ] ;
-    
-    deferredbufferindex++ ;
-    
-    if( deferredbuffer[ deferredbufferindex ] == 0 )
-    {
-        deferredbufferindex = -1 ;
-    }
-    
-    return retv ;
+	/* We need to append this in reverse as we are going to read input from this
+	 */
+	if( ( src == NULL ) || ( deferredbuffer == NULL ) )
+		return ;
+	
+	int len = 0 ;
+	
+	len = strlen( src ) ;
+	
+	if( len <= 0 )
+		return ;
+	
+	int i = len - 1 ;
+	
+	int k = BUFFER_INDEX(deferredbuffer) ;
+	
+	while( i >= 0 )
+	{
+		deferredbuffer[k] = src[i] ;
+		
+		if( k < sizeof(deferredbuffer) )
+		{
+			k++ ;
+		}
+		
+		i-- ;
+	};
+	
+	/* make sure the buffer is nul terminated
+	 */
+	buff[k] = 0 ;
+	
+	/* update the index
+	 */
+    BUFFER_INDEX(deferredbuffer) = k ;
 }
-
 
 /*******************************************************
  */
@@ -384,7 +492,7 @@ static int in_quotes = FALSE ;
  * buffer or presume the ability to change file
  * position.
  *
- * At ALL times rotatingbufferindex points to the NEXT
+ * At ALL times rotatingbuffer_idx points to the NEXT
  * character position to fill.
  *
  * It is initialized to ALL zeros.
@@ -394,9 +502,9 @@ static int in_quotes = FALSE ;
  * the buffer is accessed by code expecting a nul terminator,
  * and so rotatingbuffe[BUFFLEN] == 0 at all times.
  */
-static char rotatingbuffer[BUFFLEN+1] ;
 
-static int rotatingbufferindex = 0 ;
+
+BUFFER_DECL( rotatingbuffer ) ;
 
 
 static char get_rotatingbuffer_char( int nidx )
@@ -411,7 +519,7 @@ static char get_rotatingbuffer_char( int nidx )
     if( nidx < BUFFLEN )
         return 0 ;
     
-    int j = rotatingbufferindex ;
+    int j = rotatingbuffer_idx ;
     
     j += nidx ;
     
@@ -455,8 +563,7 @@ int nextchar()
                 
                 retv = read_from_deferred_buffer() ;
             }
-            
-            if( retv == (int)'}' )
+            else if( retv == (int)'}' )
             {
                 append_to_deferredbuffer( close_brace_macro ) ;
                 
@@ -470,13 +577,13 @@ int nextchar()
     
     if( /* ( ! in_quotes ) && */ ( ! in_comment ) )
     {
-        rotatingbuffer[rotatingbufferindex] = (char)retv ;
-        rotatingbufferindex++ ;
-        rotatingbufferindex %= BUFFLEN ;
-        rotatingbuffer[rotatingbufferindex] = 0 ;
+        rotatingbuffer[rotatingbuffer_idx] = (char)retv ;
+        rotatingbuffer_idx++ ;
+        rotatingbuffer_idx %= BUFFLEN ;
+        rotatingbuffer[rotatingbuffer_idx] = 0 ;
     }
     
-    if( /* retv */ lastchar_read == (int)'\n' )
+    if( lastchar_read == (int)'\n' )
     {
         linenum++ ;
     }
@@ -488,6 +595,85 @@ int nextchar()
 
 /*******************************************************
  */
+
+BUFFER_DECL( escaped_char_seq ) ;
+
+
+int read_escaped_char( boolean_t writeout )
+{
+    int d = -1 ;
+    
+    BUFFER_INIT( escaped_char_seq ) ;
+
+    d = nextchar() ;
+    
+    switch( d )
+    {
+        case (int)'0' :
+        case (int)'1' :
+        case (int)'2' :
+        case (int)'3' :
+        case (int)'4' :
+        case (int)'5' :
+        case (int)'6' :
+        case (int)'7' :
+            /* octal : at nost 3 octal digits
+             */
+            d = nextchar() ;
+
+            if( ( d < (int)'0' ) || ( d > (int)'7' ) )
+            {
+                pendchar( d ) ;
+                break ;
+            }
+
+            if( writeout ) { FPUT( d ) ; }
+
+            d = nextchar() ;
+
+            if( ( d < (int)'0' ) || ( d > (int)'7' ) )
+            {
+                pendchar( d ) ;
+                break ;
+            }
+            
+            if( writeout ) { FPUT( d ) ; }
+
+            break ;
+        
+        case 'x' :
+        case 'u' :
+        case 'U' :
+            /* all of these are arbitrarily long sequences of hex digits
+             */
+            while( ( !feof(fin) ) && ( d != '\n' ) && isxdigit( d ) )
+            {
+                if( writeout ) { FPUT( d ) ; }
+
+                d = nextchar() ;
+            };
+            /* the last char read was a dud for some reason
+             * put it in the pending character store
+             */
+            pendchar( d ) ;
+            
+            break ;
+        
+        default:
+            /* The default handles both well defined single escaped chars
+             * and undefined single escaped chars the same - it
+             * assumes the char is valid and outputs it.
+             *
+             * This is typical behavior for C-like parsers.
+             */
+            if( writeout ) { FPUT( d ) ; }
+
+            break ;
+    }
+    
+    return d ;
+}
+
 
 /* Read characters inside quotations until we either run out
  * ( which is an error and returns -1 ) or we reach the end
@@ -524,7 +710,7 @@ int pass_chars_in_quotes( int endquotechar )
         
         if( c == '\\' )
         {
-            // an escaped character - read the next char
+            // an escaped character - read the sequence
             
             d = nextchar() ;
             
@@ -538,7 +724,7 @@ int pass_chars_in_quotes( int endquotechar )
                 case (int)'5' :
                 case (int)'6' :
                 case (int)'7' :
-                    /* octal : at nost 3 octal digits
+                    /* octal : at most 3 octal digits
                      */
                     FPUT( d ) ;
                     d = nextchar() ;
@@ -598,7 +784,10 @@ int pass_chars_in_quotes( int endquotechar )
 /* readchar(c) reads input characters until it finds a
  * match to the one requested.
  *
- * it ignores ONLY isspace() characters
+ * it ONLY ignores isspace() characters.
+ * 
+ * If you pass a whitespace character to it ( ie. try
+ * and match to a whitespace ) it simply returns immediately.
  *
  * a return of -1 is an error
  * a return matching the requested char is valid
@@ -607,6 +796,11 @@ int readchar( int cwanted )
 {
     int retv = -1 ;
     int c = 0 ;
+    
+    if( iswhitespace(cwanted) )
+    {
+		return retv ;
+	}
 
     c = nextchar() ;
 
@@ -644,18 +838,18 @@ int readchar( int cwanted )
  * trailing and lead whitespace is stored in the
  * prebuff and postbuff buffers.
  */
+
+
+
 int readsymbol()
 {
     int retv = 0 ;
 
-    int i = 0 ;
-    int j = 0 ;
-    int k = 0 ;
     int c = 0 ;
-
-    prebuff[0]  = '\0' ;
-    postbuff[0] = '\0' ;
-    buff[0]     = '\0' ;
+    
+    BUFFER_INIT( prebuff ) ;
+    BUFFER_INIT( buff ) ;
+    BUFFER_INIT( postbuff ) ;
 
     if( quote_pending )
     {
@@ -665,7 +859,7 @@ int readsymbol()
 
     c = nextchar() ;
 
-    while( ( i < BUFFLEN ) && ( j < BUFFLEN ) )
+    while( BUFFER_AVAILABLE(buff) && BUFFER_AVAILABLE(prebuff) )
     {
         if( inside_quotes )
         {
@@ -679,9 +873,8 @@ int readsymbol()
             if( escape_pending )
             {
                 toggle(escape_pending) ;
-
-                buff[i] = (char)c ;
-                i++ ;
+                
+                appendc( c, buff ) ;
             }
             else
             {
@@ -697,8 +890,7 @@ int readsymbol()
                     toggle(escape_pending) ;
                 }
 
-                buff[i] = (char)c ;
-                i++ ;
+				appendc( c, buff ) ;
             }
 
             /* go back to start of loop
@@ -713,10 +905,9 @@ int readsymbol()
         /* note that this only happens if we are not inside_quotes
          */
 
-        if( ( i == 0 ) && iswhitespace(c) )
+        if( ( BUFFER_INDEX(buff) == 0 ) && iswhitespace(c) )
         {
-            prebuff[j] = (char)c ;
-            j++ ;
+			appendc( c, prebuff ) ;
 
             c = nextchar() ;
 
@@ -725,8 +916,7 @@ int readsymbol()
 
         if( issymbolchar(c) )
         {
-            buff[i] = (char)c ;
-            i++ ;
+			appendc( c, buff ) ;
         }
         else
         {
@@ -741,13 +931,14 @@ int readsymbol()
         c = nextchar() ;
     };
 
-    buff[i] = '\0' ;
-    prebuff[j] = '\0' ;
+	appendc( 0, buff ) ;
+	appendc( 0, prebuff ) ;
+    
+    // k = 0 ;
 
-    while( ( k < BUFFLEN ) && iswhitespace(c) )
+    while( BUFFER_AVAILABLE(postbuff) && iswhitespace(c) )
     {
-        postbuff[k] = (char)c ;
-        k++ ;
+		appendc( c, postbuff ) ;
 
         c = nextchar() ;
     };
@@ -763,7 +954,7 @@ int readsymbol()
         c = (int)' ' ;
     }
 
-    postbuff[k] = '\0' ;
+	appendc( 0, postbuff ) ;
 
     retv = c ;
     
@@ -783,6 +974,7 @@ int readsymbol()
     return retv ;
 }
 
+
 /*******************************************************
  */
 
@@ -793,9 +985,10 @@ int read_to_eol()
 {
     int retv = 0 ;
     int c = 0 ;
-    int i = 0 ;
+    
+    BUFFER_INIT( buff ) ;
 
-    while( ( i < BUFFLEN ) && ( c != -1 ) )
+    while( BUFFER_AVAILABLE(buff) && ( c != -1 ) )
     {
         c = nextchar() ;
 
@@ -804,13 +997,11 @@ int read_to_eol()
 
         if( c != -1 )
         {
-            buff[i] = (char)c ;
-
-            i++ ;
+			appendc( c, buff ) ;
         }
     };
 
-    buff[i] = 0 ;
+    appendc( 0, buff ) ;
 
     return retv ;
 }
@@ -820,12 +1011,14 @@ int read_to_eol()
 
 /* this function pushes a copy of a buffer onto the stack
  *
- * basically it's a simply list for later checking
+ * basically it's a simple list for later checking
  *
  * the data structure supports these lists
  *
  * if checklen is nonzero then only copy the buffer if length
- * is greater than zero
+ * is greater than zero.  There may be situations when we
+ * want to copy a zero-length string to the stack, so we need
+ * the option.
  */
 
 void stackcopybuffer( char *buffer, int checklen )
@@ -962,7 +1155,9 @@ void stackfree()
 
 /* check if the stack contains the currently buffered symbol
  *
- * this function return true (1) if it is and false (0) if not
+ * this function return TRUE if it is and FALSE if not
+ * TRUE is normally 1 and FALSE should be 0, but use the
+ * macros TRUE and FALSE and not explicit values.
  */
 int symbolonstack()
 {
@@ -1237,7 +1432,7 @@ static int ends_in_continuation()
 
 /* process a redefine
  *
- * The C proeprocessor requires that you first undefine
+ * The C preprocessor requires that you first undefine
  * a macro before redefining, but has no direct support
  * for doing that automatically.
  */
@@ -1292,6 +1487,8 @@ int process_def()
     int c = 0 ;
     int newc = 0 ;
 
+    boolean_t isbracketable = FALSE ;
+    
     /* first we need to read the definition part
      * which should be of the form <macroname>([<parametername>{,<parametername>}])
      *
@@ -1353,8 +1550,17 @@ int process_def()
 
                 c = (int)macrochar ;
             }
-
-            if( symbolonstack() )
+            
+            isbracketable = symbolonstack() ;
+            
+            if( isbracketable )
+            {
+                /* check following characters to see if the first non-whitespace
+                 * sequence is a double hash char
+                 */
+            }
+            
+            if( isbracketable )
             {
                 FPUTS( prebuff ) ;
                 FPUT( '(' ) ;
@@ -1862,8 +2068,7 @@ int main_process()
     
     apply_brace_macros = FALSE ;
     
-    deferredbufferindex = -1 ;
-    deferredbuffer[0] = 0 ;
+    BUFFER_INIT( deferredbuffer ) ;
     
     escape_pending = FALSE ;
     
@@ -1873,17 +2078,16 @@ int main_process()
     lastchar_read = -1 ;
     currentchar_read = -1 ;
     
-    buff[0] = 0 ;
+    BUFFER_INIT( prebuff ) ;
+    BUFFER_INIT( buff ) ;
+    BUFFER_INIT( postbuff ) ;
+
     
-    rotatingbufferindex = 0 ;
-    memset( rotatingbuffer, 0, BUFFLEN+1 ) ;
+    BUFFER_INIT( rotatingbuffer ) ;
     
     macrochar = initial_macrochar ;
     
     pendingchar = -1 ;
-    
-    postbuff[0] = 0 ;
-    prebuff[0] = 0 ;
     
     quote_pending = FALSE ;
     
@@ -2238,11 +2442,11 @@ err_exit:
     {
         int ii = 0 ;
     
-        ii = rotatingbufferindex - 10 ;
+        ii = rotatingbuffer_idx - 10 ;
     
         if( ii < 0 ){ ii = 0  ;}
     
-        fprintf( stderr, "END buff = [%s] indicies ( 0 to %d->%d )\n", rotatingbuffer+ii, rotatingbufferindex, ii ) ;
+        fprintf( stderr, "END buff = [%s] indicies ( 0 to %d->%d )\n", rotatingbuffer+ii, rotatingbuffer_idx, ii ) ;
     }
     */
     
@@ -2255,7 +2459,7 @@ err_exit:
 
 static void version()
 {
-    char ver[128] = "$Revision: 1.106 $" ;
+    char ver[128] = "$Revision: 1.138 $" ;
     
     /* Skip the RCS string preceeding the version number
      */
