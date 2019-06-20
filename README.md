@@ -144,7 +144,7 @@ Notice how the constant names and values have been built.  This is tedious to ty
 Similar to *\#constants* but generating values suitable for use as flags ( powers of two ! ).
 
 ```C
-#constants SJG TEST
+#flags SJG TEST
 ALPHA
 BETA
 GAMMA
